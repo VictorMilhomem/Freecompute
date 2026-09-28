@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package vc.v1;
+
+option go_package = "github.com/VictorMilhomem/freecompute/vc/v1;vcv1";
+
+message Envelope {
+  uint32 version = 1;
+  string job_id  = 2;
+  oneof body {
+    JobAnnounce  announce  = 10;
+    ResultCommit commit    = 11;
+    ResultReveal reveal    = 12;
+    JobFinalize  finalize  = 13;
+  }
+}
+
+message JobAnnounce {
+  string image_ref       = 1;
+  repeated string cmd    = 2;
+  string input_cid       = 3;
+  ResourceLimits limits  = 4;
+  uint32 replicas        = 5;
+  uint32 quorum          = 6;
+  uint32 reveal_window   = 7;
+  uint64 reward_reps     = 8;
+}
+
+message ResourceLimits {
+  uint32 cpus            = 1;
+  uint64 memory_mb       = 2;
+  uint32 timeout_sec     = 3;
+  uint64 max_output_bytes = 4;
+}
+
+message ResultCommit {
+  bytes commitment = 1;
+}
+
+message ResultReveal {
+  bytes  result_hash = 1;
+  string result_cid  = 2;
+  bytes  nonce       = 3;
+  int32  exit_code   = 4;
+}
+
+message JobFinalize {
+  bytes  accepted_hash    = 1;
+  repeated string winners = 2;
+  repeated string divergent = 3;
+  repeated string no_reveal = 4;
+}
