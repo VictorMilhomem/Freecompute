@@ -152,6 +152,8 @@ func (p *podmanEngine) Logs(ctx context.Context, id string, maxBytes int64) (std
 
 	opts := new(containers.LogOptions).WithStdout(true).WithStderr(true)
 	logErr := containers.Logs(c, id, opts, stdoutChan, stderrChan)
+	close(stdoutChan)
+	close(stderrChan)
 	wg.Wait()
 
 	truncated = stdoutBuf.Truncated() || stderrBuf.Truncated()
