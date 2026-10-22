@@ -67,14 +67,13 @@ Cada processo `vcnode` inicia um nó Ergo local com os seguintes atores:
 Parâmetros do MVP: **$N = 3$ réplicas**, **$Q = 2$ quórum**. Todos os marcos do protocolo baseiam-se na **posição das mensagens na ordem consensual da cadeia** (`list order`), nunca em relógio de parede (*wall-clock*).
 
 1. **Anúncio (`JobAnnounce`)**: O Submitter adiciona o input ao IPFS e posta `JobAnnounce{input_cid, image_ref, cmd, replicas=3, quorum=2, reward_reps=1000}`. O identificador do job (`job_id`) é o `SHA-256` da serialização determinística do `JobAnnounce`.
-2. **Fase de Commit (`ResultCommit`)**: Cada Worker executa a tarefa e posta `ResultCommit{commitment}`, onde:
-   $$\text{commitment} = \text{SHA-256}(\text{job\_id} \parallel 0\text{x}00 \parallel \text{worker\_id} \parallel 0\text{x}00 \parallel \text{result\_hash} \parallel \text{nonce})$$
+2. **Fase de Commit (`ResultCommit`)**: Cada Worker executa a tarefa e posta `ResultCommit{commitment}`
    O `worker_id` é sempre a chave pública autenticada pelo Freechains nos metadados da ação (`sign`), impedindo falsificação de identidade. Commits duplicados do mesmo autor são ignorados (vale apenas o primeiro).
 3. **Transição para Reveal**: Os primeiros $N = 3$ commits válidos na ordem da cadeia são contabilizados. Assim que o $N$-ésimo commit válido aparece na cadeia, a fase muda deterministicamente de `Committing` para `Revealing` (commits posteriores são ignorados).
 4. **Fase de Reveal (`ResultReveal`)**: Cada Worker cujo commit foi contabilizado envia seu diretório `/output` ao IPFS e publica `ResultReveal{result_hash, result_cid, nonce}`. Um reveal só é válido se pertencer a um trabalhador contabilizado e se o `Commitment` recalculado bater exatamente com o commit original daquele autor.
 5. **Apuração (`Tally`) e Finalização (`JobFinalize`)**:
    - Os reveals válidos são agrupados por `result_hash`.
-   - Um grupo com pelo menos $Q = 2$ membros vence (`HasQuorum = true`, `AcceptedHash = result_hash`).
+   - Um grupo com pelo menos Q = 2 membros vence (`HasQuorum = true`, `AcceptedHash = result_hash`).
    - Trabalhadores cujo `result_hash` coincide com `AcceptedHash` são classificados como `Winners`; os que revelaram hash diferente são `Divergent`; os que comitaram mas não revelaram são `NoReveal`.
    - O Submitter baixa do IPFS o `result_cid` de um vencedor, confere se `canon.DirectoryDigest` é igual a `AcceptedHash`, posta `JobFinalize` e vota na cadeia Freechains (`like <reward> author <pub>` para cada vencedor e `dislike <reward> author <pub>` para cada `Divergent` ou `NoReveal`).
 
