@@ -298,8 +298,8 @@ Na inicialização, o `vcnode` executa `ipfs.Ping`, `sandbox.Ping` e `sandbox.Cl
 ## Concessões do MVP e Premissas Técnicas
 
 1. **Identidade Autenticada pela Cadeia**: O `worker_id` nunca é lido do payload Protobuf; ele é extraído exclusivamente do campo `sign` dos metadados da ação validada pelo Freechains (`<tipo-chave> <base64>`).
-2. **Marcos Baseados em Posição na Cadeia**: As transições de fase (`Committing` $\to$ `Revealing` no $N$-ésimo commit válido $\to$ `Done` em `JobFinalize`) dependem unicamente dos índices na ordem consensual da cadeia, nunca de relógio de parede.
-3. **Timer Local de Tolerância do Submitter (*MVP Concession*)**: O Submitter finaliza assim que todos os $N$ trabalhadores contabilizados revelam, **ou** quando já existe um grupo com quórum ($Q=2$) e `--grace` segundos (padrão `20`) se passaram no relógio local do Submitter desde a abertura da fase `Revealing`. Esse timer é estritamente local ao Submitter; nenhum outro nó depende de relógio local e todos transitam para `Done` apenas ao observar `JobFinalize` na cadeia.
+2. **Marcos Baseados em Posição na Cadeia**: As transições de fase (`Committing` to `Revealing` no N-ésimo commit válido to `Done` em `JobFinalize`) dependem unicamente dos índices na ordem consensual da cadeia, nunca de relógio de parede.
+3. **Timer Local de Tolerância do Submitter (*MVP Concession*)**: O Submitter finaliza assim que todos os N trabalhadores contabilizados revelam, **ou** quando já existe um grupo com quórum (Q=2) e `--grace` segundos (padrão `20`) se passaram no relógio local do Submitter desde a abertura da fase `Revealing`. Esse timer é estritamente local ao Submitter; nenhum outro nó depende de relógio local e todos transitam para `Done` apenas ao observar `JobFinalize` na cadeia.
 4. **Permissões do Diretório de Saída no Podman Rootless**: O container executa como UID/GID `65534:65534` (`nobody`) com filesystem raiz *read-only*. No mapeamento de user namespace do Podman rootless, o UID `65534` corresponde a um *subuid* do host (`165533`), portanto o `WorkerActor` cria o diretório de saída no host com permissão explícita `0777` (e aplica o rótulo SELinux `container_file_t` quando aplicável) antes de iniciar o container.
 5. **Materialização de Arquivo Único no IPFS**: Como `ipfs.Store.Add` adiciona um nó de arquivo único sem nome e `ipfs.Store.Fetch` o materializa como `<dest>/content`, o `IPFSAdapter.Fetch` renomeia `<dest>/content` para `<dest>/data.txt` quando busca o arquivo de entrada, permitindo que o container leia `/input/data.txt`.
 
@@ -314,6 +314,7 @@ Na inicialização, o `vcnode` executa `ipfs.Ping`, `sandbox.Ping` e `sandbox.Cl
 - [x] Exemplo Simples
 - [x] Commit-Reveal
 - [x] Quorum
+- [ ] Remover opção behavior da CLI
 - [ ] API para utilização via código
 - [ ] Exemplo via complexo via código
 
