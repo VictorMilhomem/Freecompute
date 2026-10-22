@@ -21,7 +21,7 @@ O **Freecompute** é uma plataforma de computação voluntária (*volunteer comp
 7. [Como a Demo Funciona Passo a Passo](#como-a-demo-funciona-passo-a-passo)
 8. [Uso Direto da CLI (`vcnode`)](#uso-direto-da-cli-vcnode)
 9. [Concessões do MVP e Premissas Técnicas](#concessões-do-mvp-e-premissas-técnicas)
-10. [Assumptions to verify against the real CLI](#assumptions-to-verify-against-the-real-cli)
+10. [Implementação](#implementação)
 
 ---
 
