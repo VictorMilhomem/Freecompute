@@ -27,6 +27,7 @@ type ChainAPI interface {
 	GetPayload(ctx context.Context, id string) ([]byte, error)
 	LikeAuthor(ctx context.Context, amount int64, authorPub string) error
 	DislikeAuthor(ctx context.Context, amount int64, authorPub string) error
+	RepsAuthor(ctx context.Context, authorPub string) (int64, error)
 	SyncRecv(ctx context.Context, remote string) error
 	SyncSend(ctx context.Context, remote string) error
 }
@@ -45,6 +46,7 @@ type Runner interface {
 }
 
 type ChainUpdate struct {
+	Reset   bool
 	Entries []protocol.Entry
 }
 
@@ -65,4 +67,13 @@ type VoteReq struct {
 
 type VoteResp struct {
 	Err error
+}
+
+type RepsReq struct {
+	Author string
+}
+
+type RepsResp struct {
+	Reps int64
+	Err  error
 }

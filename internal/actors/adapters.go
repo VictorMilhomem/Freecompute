@@ -7,32 +7,45 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/VictorMilhomem/freecompute/freechains"
 	"github.com/VictorMilhomem/freecompute/internal/ipfs"
 	"github.com/VictorMilhomem/freecompute/internal/sandbox"
-	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
-// FreechainsAdapter adapts *freechains.Client to ChainAPI.
-type FreechainsAdapter struct {
-	client *freechains.Client
-	alias  freechains.Alias
-	key    freechains.PrivateKeyPath
+func ReadPublicKey(privKeyPath string) (string, error) {
+	pubPath := privKeyPath
+	if !strings.HasSuffix(pubPath, ".pub") {
+		pubPath += ".pub"
+	}
+	data, err := os.ReadFile(pubPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read public key %q: %w", pubPath, err)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(data)))
+	if len(fields) < 2 {
+		return "", fmt.Errorf("invalid public key format in %q", pubPath)
+	}
+	return fields[0] + " " + fields[1], nil
 }
 
-// NewFreechainsAdapter constructs a ChainAPI backed by *freechains.Client.
-func NewFreechainsAdapter(client *freechains.Client, chainAlias, signingKeyPath string) *FreechainsAdapter {
+type FreechainsAdapter struct {
+	client  *freechains.Client
+	alias   freechains.Alias
+	keyPath freechains.PrivateKeyPath
+}
+
+func NewFreechainsAdapter(client *freechains.Client, chainAlias string, keyPath string) *FreechainsAdapter {
 	return &FreechainsAdapter{
-		client: client,
-		alias:  freechains.Alias(chainAlias),
-		key:    freechains.PrivateKeyPath(signingKeyPath),
+		client:  client,
+		alias:   freechains.Alias(chainAlias),
+		keyPath: freechains.PrivateKeyPath(keyPath),
 	}
 }
 
 func (a *FreechainsAdapter) Post(ctx context.Context, payload []byte) (string, error) {
-	tmp, err := os.CreateTemp("", "vc-post-*.bin")
+	tmp, err := os.CreateTemp("", "vc-post-*.pb")
 	if err != nil {
 		return "", err
 	}
@@ -48,12 +61,12 @@ func (a *FreechainsAdapter) Post(ctx context.Context, payload []byte) (string, e
 	}
 
 	id, err := a.client.Post(ctx, a.alias, freechains.FilePayload(tmpPath), freechains.PostOptions{
-		Sign: a.key,
+		Sign: a.keyPath,
 	})
 	if err != nil {
 		return "", err
 	}
-	return id.String(), nil
+	return string(id), nil
 }
 
 func (a *FreechainsAdapter) ListOrder(ctx context.Context) ([]OrderItem, error) {
@@ -64,7 +77,7 @@ func (a *FreechainsAdapter) ListOrder(ctx context.Context) ([]OrderItem, error) 
 	out := make([]OrderItem, len(entries))
 	for i, e := range entries {
 		out[i] = OrderItem{
-			ID:      e.ID.String(),
+			ID:      string(e.ID),
 			Revoked: e.Revoked,
 		}
 	}
@@ -78,10 +91,10 @@ func (a *FreechainsAdapter) GetMetadata(ctx context.Context, id string) (ActionM
 	}
 	var signer string
 	if m.Signer != nil {
-		signer = m.Signer.String()
+		signer = string(*m.Signer)
 	}
 	return ActionMeta{
-		ID:     m.ID.String(),
+		ID:     string(m.ID),
 		Kind:   string(m.Kind),
 		Signer: signer,
 		Time:   m.Time,
@@ -94,16 +107,20 @@ func (a *FreechainsAdapter) GetPayload(ctx context.Context, id string) ([]byte, 
 
 func (a *FreechainsAdapter) LikeAuthor(ctx context.Context, amount int64, authorPub string) error {
 	_, err := a.client.Like(ctx, a.alias, amount, freechains.AuthorTarget(freechains.PublicKey(authorPub)), freechains.VoteOptions{
-		Sign: a.key,
+		Sign: a.keyPath,
 	})
 	return err
 }
 
 func (a *FreechainsAdapter) DislikeAuthor(ctx context.Context, amount int64, authorPub string) error {
 	_, err := a.client.Dislike(ctx, a.alias, amount, freechains.AuthorTarget(freechains.PublicKey(authorPub)), freechains.VoteOptions{
-		Sign: a.key,
+		Sign: a.keyPath,
 	})
 	return err
+}
+
+func (a *FreechainsAdapter) RepsAuthor(ctx context.Context, authorPub string) (int64, error) {
+	return a.client.RepsAuthor(ctx, a.alias, freechains.PublicKey(authorPub))
 }
 
 func (a *FreechainsAdapter) SyncRecv(ctx context.Context, remote string) error {
@@ -114,48 +131,16 @@ func (a *FreechainsAdapter) SyncSend(ctx context.Context, remote string) error {
 	return a.client.SyncSend(ctx, a.alias, remote)
 }
 
-// ReadPublicKey extracts the normalized "<type> <base64>" public key corresponding
-// to a private key path, matching the format authenticated in Freechains metadata.
-func ReadPublicKey(privateKeyPath string) (string, error) {
-	if pubBytes, err := os.ReadFile(privateKeyPath + ".pub"); err == nil {
-		fields := strings.Fields(string(pubBytes))
-		if len(fields) >= 2 {
-			return fields[0] + " " + fields[1], nil
-		}
-	}
-	privBytes, err := os.ReadFile(privateKeyPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read key %s: %w", privateKeyPath, err)
-	}
-	signer, err := ssh.ParsePrivateKey(privBytes)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse private key %s: %w", privateKeyPath, err)
-	}
-	fields := strings.Fields(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	if len(fields) < 2 {
-		return "", fmt.Errorf("unexpected public key format for %s", privateKeyPath)
-	}
-	return fields[0] + " " + fields[1], nil
-}
-
-// IPFSAdapter adapts ipfs.Store to the actors.Store port.
 type IPFSAdapter struct {
 	store  ipfs.Store
 	limits ipfs.FetchLimits
 }
 
-// NewIPFSAdapter constructs a Store adapter around ipfs.Store.
 func NewIPFSAdapter(store ipfs.Store, limits ipfs.FetchLimits) *IPFSAdapter {
-	if limits.MaxBytes <= 0 {
-		limits.MaxBytes = 10 * 1024 * 1024
+	return &IPFSAdapter{
+		store:  store,
+		limits: limits,
 	}
-	if limits.MaxFiles <= 0 {
-		limits.MaxFiles = 100
-	}
-	if limits.MaxDepth <= 0 {
-		limits.MaxDepth = 8
-	}
-	return &IPFSAdapter{store: store, limits: limits}
 }
 
 func (a *IPFSAdapter) Add(ctx context.Context, r io.Reader) (string, error) {
@@ -175,41 +160,34 @@ func (a *IPFSAdapter) AddDir(ctx context.Context, dir string) (string, error) {
 }
 
 func (a *IPFSAdapter) Fetch(ctx context.Context, cidStr string, dest string) error {
-	cid, err := ipfs.ParseCID(cidStr)
+	id, err := ipfs.ParseCID(cidStr)
 	if err != nil {
 		return err
 	}
-	if _, err := a.store.Fetch(ctx, cid, dest, a.limits); err != nil {
-		return err
-	}
-	// internal/ipfs.Fetch materializes a single unnamed file node as "content".
-	// Rename it to "data.txt" when fetching a single input file so the container
-	// command can read /input/data.txt directly.
-	contentPath := filepath.Join(dest, "content")
-	dataPath := filepath.Join(dest, "data.txt")
-	if info, err := os.Stat(contentPath); err == nil && info.Mode().IsRegular() {
-		if _, err := os.Stat(dataPath); os.IsNotExist(err) {
-			if err := os.Rename(contentPath, dataPath); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	_, err = a.store.Fetch(ctx, id, dest, a.limits)
+	return err
 }
 
 func (a *IPFSAdapter) Ping(ctx context.Context) error {
 	return a.store.Ping(ctx)
 }
 
-// SandboxAdapter adapts sandbox.Runner to the actors.Runner port.
 type SandboxAdapter struct {
 	runner sandbox.Runner
 	limits sandbox.Limits
+	policy sandbox.ImagePolicy
 }
 
-// NewSandboxAdapter constructs a Runner adapter around sandbox.Runner.
-func NewSandboxAdapter(runner sandbox.Runner, limits sandbox.Limits) *SandboxAdapter {
-	return &SandboxAdapter{runner: runner, limits: limits}
+func NewSandboxAdapter(runner sandbox.Runner, limits sandbox.Limits, policy ...sandbox.ImagePolicy) *SandboxAdapter {
+	var p sandbox.ImagePolicy
+	if len(policy) > 0 {
+		p = policy[0]
+	}
+	return &SandboxAdapter{
+		runner: runner,
+		limits: limits,
+		policy: p,
+	}
 }
 
 func (a *SandboxAdapter) Run(ctx context.Context, imageRef string, cmd []string, inputDir, outputDir string) (int32, error) {
@@ -217,8 +195,23 @@ func (a *SandboxAdapter) Run(ctx context.Context, imageRef string, cmd []string,
 	if err != nil {
 		return -1, err
 	}
-	relabelForSELinux(inputDir)
-	relabelForSELinux(outputDir)
+	if a.policy != nil {
+		if err := a.policy.Allow(ref); err != nil {
+			return -1, fmt.Errorf("%w: %v", sandbox.ErrImageNotAllowed, err)
+		}
+	}
+	if err := a.runner.EnsureImage(ctx, ref); err != nil {
+		return -1, err
+	}
+
+	_ = filepath.WalkDir(inputDir, func(p string, _ os.DirEntry, err error) error {
+		if err == nil {
+			labelForContainer(p)
+		}
+		return nil
+	})
+	labelForContainer(outputDir)
+
 	res, err := a.runner.Run(ctx, sandbox.Spec{
 		Image:     ref,
 		Cmd:       cmd,
@@ -227,24 +220,15 @@ func (a *SandboxAdapter) Run(ctx context.Context, imageRef string, cmd []string,
 		Limits:    a.limits,
 	})
 	if err != nil {
-		return res.ExitCode, err
-	}
-	if res.ExitCode != 0 {
-		return res.ExitCode, fmt.Errorf("container exited with code %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+		return -1, err
 	}
 	return res.ExitCode, nil
 }
 
-// relabelForSELinux sets container_file_t on bind-mounted directories so
-// rootless Podman containers can read/write them on SELinux-enforcing hosts.
-func relabelForSELinux(root string) {
-	const label = "unconfined_u:object_r:container_file_t:s0\x00"
-	_ = filepath.WalkDir(root, func(p string, _ os.DirEntry, err error) error {
-		if err == nil {
-			_ = syscall.Setxattr(p, "security.selinux", []byte(label), 0)
-		}
-		return nil
-	})
+// Rootless Podman on SELinux-enforcing hosts blocks container access to bind mounts
+// in /tmp unless labeled container_file_t.
+func labelForContainer(path string) {
+	_ = unix.Setxattr(path, "security.selinux", []byte("unconfined_u:object_r:container_file_t:s0\x00"), 0)
 }
 
 func (a *SandboxAdapter) Cleanup(ctx context.Context) error {

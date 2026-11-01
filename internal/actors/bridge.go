@@ -2,7 +2,6 @@ package actors
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"ergo.services/ergo/act"
@@ -18,144 +17,195 @@ type BridgeConfig struct {
 	Targets      []gen.Atom
 }
 
-type pollTick struct{}
+type pollChainMsg struct{}
+
+type RepsDirectMsg struct {
+	Author string
+	Reply  chan RepsResp
+}
 
 type cachedAction struct {
 	author   string
 	envelope *vcv1.Envelope
+	skip     bool
 }
 
 type ChainBridge struct {
 	act.Actor
-
-	api     ChainAPI
-	cfg     BridgeConfig
-	cache   map[string]cachedAction
-	skipped map[string]bool
+	chain     ChainAPI
+	cfg       BridgeConfig
+	cache     map[string]cachedAction
+	prevOrder []string
 }
 
-func NewChainBridge(api ChainAPI, cfg BridgeConfig) *ChainBridge {
+func NewChainBridge(chain ChainAPI, cfg BridgeConfig) *ChainBridge {
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = time.Second
+		cfg.PollInterval = 500 * time.Millisecond
 	}
 	return &ChainBridge{
-		api:     api,
-		cfg:     cfg,
-		cache:   make(map[string]cachedAction),
-		skipped: make(map[string]bool),
+		chain: chain,
+		cfg:   cfg,
+		cache: make(map[string]cachedAction),
 	}
 }
 
 func (b *ChainBridge) Init(args ...any) error {
-	_ = b.Send(b.PID(), pollTick{})
+	_, _ = b.SendAfter(b.PID(), pollChainMsg{}, 10*time.Millisecond)
 	return nil
 }
 
 func (b *ChainBridge) HandleMessage(from gen.PID, message any) error {
-	switch message.(type) {
-	case pollTick:
-		b.syncAndPoll(context.Background())
-		_, _ = b.SendAfter(b.PID(), pollTick{}, b.cfg.PollInterval)
+	switch msg := message.(type) {
+	case pollChainMsg:
+		b.pollChain()
+		_, _ = b.SendAfter(b.PID(), pollChainMsg{}, b.cfg.PollInterval)
+
+	case RepsDirectMsg:
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		reps, err := b.chain.RepsAuthor(ctx, msg.Author)
+		cancel()
+		if msg.Reply != nil {
+			msg.Reply <- RepsResp{Reps: reps, Err: err}
+		}
 	}
 	return nil
 }
 
 func (b *ChainBridge) HandleCall(from gen.PID, ref gen.Ref, request any) (any, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	switch req := request.(type) {
 	case PublishReq:
-		if req.Envelope == nil {
-			return PublishResp{Err: fmt.Errorf("envelope cannot be nil")}, nil
-		}
 		data, err := proto.MarshalOptions{Deterministic: true}.Marshal(req.Envelope)
 		if err != nil {
 			return PublishResp{Err: err}, nil
 		}
-		id, err := b.api.Post(ctx, data)
-		if err == nil {
-			b.syncAndPoll(ctx)
+		id, err := b.chain.Post(ctx, data)
+		if err != nil {
+			return PublishResp{Err: err}, nil
 		}
-		return PublishResp{ActionID: id, Err: err}, nil
+		for _, peer := range b.cfg.Peers {
+			_ = b.chain.SyncSend(ctx, peer)
+		}
+		b.pollChain()
+		return PublishResp{ActionID: id}, nil
 
 	case VoteReq:
 		var err error
 		if req.Like {
-			err = b.api.LikeAuthor(ctx, req.Amount, req.Author)
+			err = b.chain.LikeAuthor(ctx, req.Amount, req.Author)
 		} else {
-			err = b.api.DislikeAuthor(ctx, req.Amount, req.Author)
+			err = b.chain.DislikeAuthor(ctx, req.Amount, req.Author)
 		}
 		if err == nil {
-			b.syncAndPoll(ctx)
+			for _, peer := range b.cfg.Peers {
+				_ = b.chain.SyncSend(ctx, peer)
+			}
 		}
 		return VoteResp{Err: err}, nil
 
-	default:
-		return nil, fmt.Errorf("unknown request type %T", request)
+	case RepsReq:
+		reps, err := b.chain.RepsAuthor(ctx, req.Author)
+		return RepsResp{Reps: reps, Err: err}, nil
 	}
+	return nil, nil
 }
 
-func (b *ChainBridge) syncAndPoll(ctx context.Context) {
+func (b *ChainBridge) pollChain() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	for _, peer := range b.cfg.Peers {
-		if peer == "" {
-			continue
-		}
-		if err := b.api.SyncRecv(ctx, peer); err != nil {
-			b.Log().Warning("sync recv from %s failed: %v", peer, err)
-			continue
-		}
-		if err := b.api.SyncSend(ctx, peer); err != nil {
-			b.Log().Warning("sync send to %s failed: %v", peer, err)
-		}
+		_ = b.chain.SyncRecv(ctx, peer)
+		_ = b.chain.SyncSend(ctx, peer)
 	}
 
-	order, err := b.api.ListOrder(ctx)
+	order, err := b.chain.ListOrder(ctx)
 	if err != nil {
-		b.Log().Warning("list order failed: %v", err)
 		return
 	}
 
-	var entries []protocol.Entry
+	type resolvedItem struct {
+		id    string
+		entry protocol.Entry
+		valid bool
+	}
+
+	resolved := make([]resolvedItem, 0, len(order))
 	for idx, item := range order {
-		if item.Revoked || b.skipped[item.ID] {
+		if item.Revoked {
 			continue
 		}
-
-		cached, ok := b.cache[item.ID]
+		ca, ok := b.cache[item.ID]
 		if !ok {
-			meta, err := b.api.GetMetadata(ctx, item.ID)
+			meta, err := b.chain.GetMetadata(ctx, item.ID)
 			if err != nil {
-				b.Log().Warning("get metadata %s failed: %v", item.ID, err)
-				continue
+				return
 			}
 			if meta.Kind != "post" || meta.Signer == "" {
-				b.skipped[item.ID] = true
+				b.cache[item.ID] = cachedAction{skip: true}
 				continue
 			}
-			payload, err := b.api.GetPayload(ctx, item.ID)
+			payload, err := b.chain.GetPayload(ctx, item.ID)
 			if err != nil {
-				b.Log().Warning("get payload %s failed: %v", item.ID, err)
+				return
+			}
+			env := &vcv1.Envelope{}
+			if err := proto.Unmarshal(payload, env); err != nil {
+				b.cache[item.ID] = cachedAction{skip: true}
 				continue
 			}
-			var env vcv1.Envelope
-			if err := proto.Unmarshal(payload, &env); err != nil || env.Version != 1 {
-				b.skipped[item.ID] = true
-				continue
-			}
-			cached = cachedAction{
+			ca = cachedAction{
 				author:   meta.Signer,
-				envelope: &env,
+				envelope: env,
 			}
-			b.cache[item.ID] = cached
+			b.cache[item.ID] = ca
 		}
-
-		entries = append(entries, protocol.Entry{
-			Index:    idx,
-			Author:   cached.author,
-			Envelope: cached.envelope,
+		if ca.skip {
+			continue
+		}
+		resolved = append(resolved, resolvedItem{
+			id: item.ID,
+			entry: protocol.Entry{
+				Index:    idx,
+				Author:   ca.author,
+				Envelope: ca.envelope,
+			},
+			valid: true,
 		})
 	}
 
-	update := ChainUpdate{Entries: entries}
+	curIDs := make([]string, len(resolved))
+	for i, r := range resolved {
+		curIDs[i] = r.id
+	}
+
+	divIdx := 0
+	for divIdx < len(b.prevOrder) && divIdx < len(curIDs) && b.prevOrder[divIdx] == curIDs[divIdx] {
+		divIdx++
+	}
+
+	if divIdx == len(b.prevOrder) && divIdx == len(curIDs) {
+		return
+	}
+
+	reset := divIdx < len(b.prevOrder)
+	start := divIdx
+	if reset {
+		start = 0
+	}
+
+	entries := make([]protocol.Entry, 0, len(resolved)-start)
+	for i := start; i < len(resolved); i++ {
+		entries = append(entries, resolved[i].entry)
+	}
+	b.prevOrder = curIDs
+
+	update := ChainUpdate{
+		Reset:   reset,
+		Entries: entries,
+	}
 	for _, target := range b.cfg.Targets {
 		_ = b.Send(target, update)
 	}
