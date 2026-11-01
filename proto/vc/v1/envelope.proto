@@ -12,6 +12,7 @@ message Envelope {
     ResultCommit commit    = 11;
     ResultReveal reveal    = 12;
     JobFinalize  finalize  = 13;
+    Tick         tick      = 14;
   }
 }
 
@@ -24,12 +25,13 @@ message JobAnnounce {
   uint32 quorum          = 6;
   uint32 reveal_window   = 7;
   uint64 reward_reps     = 8;
+  uint32 commit_window   = 9;
 }
 
 message ResourceLimits {
-  uint32 cpus            = 1;
-  uint64 memory_mb       = 2;
-  uint32 timeout_sec     = 3;
+  uint32 cpus             = 1;
+  uint64 memory_mb        = 2;
+  uint32 timeout_sec      = 3;
   uint64 max_output_bytes = 4;
 }
 
@@ -45,8 +47,12 @@ message ResultReveal {
 }
 
 message JobFinalize {
-  bytes  accepted_hash    = 1;
-  repeated string winners = 2;
+  bytes  accepted_hash      = 1;
+  repeated string winners   = 2;
   repeated string divergent = 3;
   repeated string no_reveal = 4;
+}
+
+message Tick {
+  string job_id = 1;
 }
