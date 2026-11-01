@@ -1,2 +1,4 @@
-docs/
-freechains/testdata/
+bin/
+*.log
+vc-state/
+.fc.lock
