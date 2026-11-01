@@ -1,41 +1,54 @@
-# Project variables
-BINARY_NAME ?= go-freecompute
+BINARY_NAME ?= vcnode
+FAULTY_BINARY_NAME ?= vcnode-faulty
+EXAMPLE_BINARY_NAME ?= example-simple
 BUILD_DIR ?= bin
-MAIN_SRC ?= ./cmd/main.go
+MAIN_SRC ?= ./cmd/vcnode
+FAULTY_SRC ?= ./cmd/vcnode-faulty
+EXAMPLE_SRC ?= ./examples/simple
 GO ?= go
-export CGO_ENABLED ?= 0
-export GOFLAGS ?= -tags=containers_image_openpgp
+PODMAN_TAGS ?= containers_image_openpgp,exclude_graphdriver_btrfs
+export GOFLAGS ?= -tags=$(PODMAN_TAGS)
+export VC_IMAGE ?= docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e
+export CCACHE_DIR ?= /tmp/ccache
 
-.PHONY: all build run test fmt vet tidy clean help
+.PHONY: all build build-faulty build-example example test race demo demo-divergent fmt vet tidy clean
 
-all: build ## Build the Go binary (default)
+all: build build-example
 
-build: ## Build the Go binary to bin/ directory
-	@echo "Building binary..."
+build:
 	@mkdir -p $(BUILD_DIR)
-	$(GO) build -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_SRC)
+	CGO_ENABLED=0 $(GO) build -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_SRC)
 
-run: ## Run the Go application directly
-	$(GO) run $(MAIN_SRC)
+build-faulty:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO) build -tags faulty,$(PODMAN_TAGS) -o $(BUILD_DIR)/$(FAULTY_BINARY_NAME) $(FAULTY_SRC)
 
-test: ## Run unit tests
-	$(GO) test -v ./...
+build-example:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO) build -o $(BUILD_DIR)/$(EXAMPLE_BINARY_NAME) $(EXAMPLE_SRC)
 
-fmt: ## Format source code using go fmt
+example: build-example
+
+test:
+	CGO_ENABLED=0 $(GO) test ./...
+
+race:
+	CGO_ENABLED=1 $(GO) test -race ./...
+
+demo: build build-example
+	./scripts/demo.sh
+
+demo-divergent: build build-faulty build-example
+	./scripts/demo.sh --divergent
+
+fmt:
 	$(GO) fmt ./...
 
-vet: ## Run static code analysis using go vet
-	$(GO) vet ./...
+vet:
+	CGO_ENABLED=0 $(GO) vet ./...
 
-tidy: ## Tidy module dependencies
+tidy:
 	$(GO) mod tidy
 
-clean: ## Remove build artifacts and binary directory
-	@echo "Cleaning up..."
+clean:
 	rm -rf $(BUILD_DIR)
-
-help: ## Display available Makefile targets
-	@echo "Usage: make [target]"
-	@echo ""
-	@echo "Targets:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'

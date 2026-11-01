@@ -111,9 +111,26 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> Building vcnode..."
-VCNODE_BIN="$TMP_DIR/vcnode"
-(cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$VCNODE_BIN" ./cmd/vcnode)
+echo "==> Checking binaries..."
+mkdir -p "$REPO_ROOT/bin"
+VCNODE_BIN="$REPO_ROOT/bin/vcnode"
+EXAMPLE_BIN="$REPO_ROOT/bin/example-simple"
+if [[ ! -x "$VCNODE_BIN" ]]; then
+    (cd "$REPO_ROOT" && make -s build)
+fi
+if [[ ! -x "$EXAMPLE_BIN" ]]; then
+    (cd "$REPO_ROOT" && make -s build-example)
+fi
+
+CAROL_BIN="$VCNODE_BIN"
+CAROL_DESC="honest"
+if [[ "$MODE" == "divergent" ]]; then
+    CAROL_BIN="$REPO_ROOT/bin/vcnode-faulty"
+    CAROL_DESC="vcnode-faulty"
+    if [[ ! -x "$CAROL_BIN" ]]; then
+        (cd "$REPO_ROOT" && make -s build-faulty)
+    fi
+fi
 
 echo "==> Generating ed25519 keys for alice, bob, carol..."
 mkdir -p "$TMP_DIR/keys"
@@ -185,43 +202,57 @@ cat >"$INPUT_FILE" <<'EOF'
 volunteer computing on freechains ipfs and podman works end to end
 EOF
 
-CAROL_BEHAVIOR="honest"
-if [[ "$MODE" == "divergent" ]]; then
-    CAROL_BEHAVIOR="divergent"
-fi
-
-echo "==> Starting worker nodes bob (honest) and carol ($CAROL_BEHAVIOR)..."
+echo "==> Starting worker nodes bob (honest) and carol ($CAROL_DESC)..."
 "$VCNODE_BIN" run \
     --id=bob \
     --root="$TMP_DIR/bob/root" \
     --key="$TMP_DIR/keys/bob" \
     --chain="$CHAIN" \
     --peers="localhost:8331,localhost:8333" \
-    --behavior=honest >"$TMP_DIR/bob/vcnode.log" 2>&1 &
-echo "$!" >"$TMP_DIR/bob/vcnode.pid"
-PIDS+=("$!")
+    --allow-any-image >"$TMP_DIR/bob/vcnode.log" 2>&1 &
+BOB_PID="$!"
+echo "$BOB_PID" >"$TMP_DIR/bob/vcnode.pid"
+PIDS+=("$BOB_PID")
 
-"$VCNODE_BIN" run \
+"$CAROL_BIN" run \
     --id=carol \
     --root="$TMP_DIR/carol/root" \
     --key="$TMP_DIR/keys/carol" \
     --chain="$CHAIN" \
     --peers="localhost:8331,localhost:8332" \
-    --behavior="$CAROL_BEHAVIOR" >"$TMP_DIR/carol/vcnode.log" 2>&1 &
-echo "$!" >"$TMP_DIR/carol/vcnode.pid"
-PIDS+=("$!")
+    --allow-any-image >"$TMP_DIR/carol/vcnode.log" 2>&1 &
+CAROL_PID="$!"
+echo "$CAROL_PID" >"$TMP_DIR/carol/vcnode.pid"
+PIDS+=("$CAROL_PID")
 
-echo "==> Starting alice with --submit..."
-REPORT_FILE="$TMP_DIR/alice_report.txt"
-"$VCNODE_BIN" run \
+sleep 0.2
+for node_pid in "$BOB_PID" "$CAROL_PID"; do
+    if ! kill -0 "$node_pid" 2>/dev/null; then
+        echo "FAIL: worker node ($node_pid) exited prematurely" >&2
+        cat "$TMP_DIR/bob/vcnode.log" "$TMP_DIR/carol/vcnode.log" >&2 || true
+        exit 1
+    fi
+done
+
+REPORT_FILE="$TMP_DIR/alice.report"
+ALICE_LOG="$TMP_DIR/alice.log"
+echo "==> Starting alice via bin/example-simple (SDK Submitter)..."
+if ! "$EXAMPLE_BIN" \
     --id=alice \
     --root="$TMP_DIR/alice/root" \
     --key="$TMP_DIR/keys/alice" \
     --chain="$CHAIN" \
-    --peers="localhost:8332,localhost:8333" \
-    --behavior=honest \
-    --submit="$INPUT_FILE" \
-    --grace=20 >"$REPORT_FILE"
+    --peers=localhost:8332,localhost:8333 \
+    --state-dir="$TMP_DIR/alice-state" \
+    --image="$VC_IMAGE" \
+    --input="$INPUT_FILE" \
+    --out="$TMP_DIR/alice-out" \
+    --allow-own-jobs \
+    --timeout=3m >"$REPORT_FILE" 2>"$ALICE_LOG"; then
+    echo "FAIL: bin/example-simple exited non-zero; alice.log:" >&2
+    cat "$ALICE_LOG" >&2 || true
+    exit 1
+fi
 
 echo ""
 echo "==> Chain Timeline (consensus order on alice):"
